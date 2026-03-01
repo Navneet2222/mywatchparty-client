@@ -6,7 +6,7 @@ import {
   Send, Share2, Settings, Monitor, LogOut, Check
 } from 'lucide-react';
 
-// IMPORTANT: Replace this with your actual Render URL!
+// IMPORTANT: Replace this with your actual Render URL before deploying to Vercel!
 const SOCKET_URL = "https://mywatchparty-backend-xyz.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
@@ -24,10 +24,10 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [copySuccess, setCopySuccess] = useState(false);
-  const [roomParticipants, setRoomParticipants] = useState([]); // Basic socket users
+  const [roomParticipants, setRoomParticipants] = useState([]); 
   
   // WebRTC State
-  const [peers, setPeers] = useState([]); // Active video/audio connections
+  const [peers, setPeers] = useState([]); 
   const [localStream, setLocalStream] = useState(null);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isMicOn, setIsMicOn] = useState(false);
@@ -50,7 +50,6 @@ export default function App() {
     socket.on('user-disconnected', (userId) => {
       setRoomParticipants(prev => prev.filter(p => p.id !== userId));
       
-      // Remove peer connection if they were on video
       const peerObj = peersRef.current.find(p => p.peerID === userId);
       if (peerObj) peerObj.peer.destroy();
       
@@ -100,9 +99,7 @@ export default function App() {
 
   // --- 2. WEBRTC SIGNALING LISTENERS ---
   useEffect(() => {
-    // When someone else turns on their camera and calls us
     socket.on('user-joined-rtc', payload => {
-      // Only answer if we have already enabled our own media stream
       if (localStream) {
         const peer = addPeer(payload.signal, payload.callerID, localStream);
         const newPeerObj = {
@@ -115,7 +112,6 @@ export default function App() {
       }
     });
 
-    // When someone answers our call
     socket.on('receiving-returned-signal', payload => {
       const item = peersRef.current.find(p => p.peerID === payload.id);
       if (item) {
@@ -132,11 +128,9 @@ export default function App() {
   // --- 3. MEDIA CAPTURE & PEER CREATION ---
   const toggleMedia = async (type) => {
     try {
-      // If we don't have a stream yet, ask for permission
       if (!localStream) {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         
-        // Start with tracks disabled until user explicitly clicks the button
         stream.getVideoTracks()[0].enabled = type === 'video';
         stream.getAudioTracks()[0].enabled = type === 'audio';
         
@@ -148,27 +142,17 @@ export default function App() {
           userVideoRef.current.srcObject = stream;
         }
 
-        // Call everyone currently in the room
         const peers = [];
         roomParticipants.forEach(user => {
           if (user.id !== socket.id) {
             const peer = createPeer(user.id, socket.id, stream);
-            peersRef.current.push({
-              peerID: user.id,
-              peer,
-              username: user.name
-            });
-            peers.push({
-              peerID: user.id,
-              peer,
-              username: user.name
-            });
+            peersRef.current.push({ peerID: user.id, peer, username: user.name });
+            peers.push({ peerID: user.id, peer, username: user.name });
           }
         });
         setPeers(peers);
 
       } else {
-        // We already have the stream, just toggle the track
         if (type === 'video') {
           localStream.getVideoTracks()[0].enabled = !isCameraOn;
           setIsCameraOn(!isCameraOn);
@@ -184,54 +168,49 @@ export default function App() {
   };
 
   const createPeer = (userToSignal, callerID, stream) => {
-    const peer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-    });
-
+    const peer = new Peer({ initiator: true, trickle: false, stream });
     peer.on('signal', signal => {
-      socket.emit('sending-signal', {
-        userToSignal,
-        callerID,
-        signal,
-        username
-      });
+      socket.emit('sending-signal', { userToSignal, callerID, signal, username });
     });
-
     return peer;
   };
 
   const addPeer = (incomingSignal, callerID, stream) => {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream,
-    });
-
+    const peer = new Peer({ initiator: false, trickle: false, stream });
     peer.on('signal', signal => {
       socket.emit('returning-signal', { signal, callerID });
     });
-
     peer.signal(incomingSignal);
     return peer;
   };
 
-  // --- 4. UI HANDLERS ---
+  // --- 4. UI HANDLERS (JOIN & HOST) ---
   const handleJoinRoom = (e) => {
     e.preventDefault();
-    if (roomId && username) {
+    if (roomId && username.trim()) {
       socket.connect();
       socket.emit('join-room', roomId, username);
       setInRoom(true);
     }
   };
 
-  const handleFileUpload = (e) => {
+  const handleHostNewRoom = (e) => {
     const file = e.target.files[0];
     if (file) {
+      if (!username.trim()) {
+        alert("Please enter your name first!");
+        return;
+      }
+      // Generate a random 6-character room ID
+      const generatedRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       const url = URL.createObjectURL(file);
+      
       setVideoFile(url);
+      setRoomId(generatedRoomId);
+      
+      socket.connect();
+      socket.emit('join-room', generatedRoomId, username);
+      setInRoom(true);
     }
   };
 
@@ -289,10 +268,12 @@ export default function App() {
       localStream.getTracks().forEach(track => track.stop());
     }
     socket.disconnect();
-    window.location.reload(); // Quickest way to clean up WebRTC state for MVP
+    window.location.reload(); 
   };
 
   // --- RENDER SCREENS ---
+
+  // LANDING PAGE (Not in Room)
   if (!inRoom) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans text-slate-100">
@@ -305,7 +286,7 @@ export default function App() {
             <p className="mt-2 text-slate-400">Sync movies, share moments.</p>
           </div>
 
-          <form onSubmit={handleJoinRoom} className="mt-8 space-y-4">
+          <div className="mt-8 space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">Your Name</label>
               <input
@@ -315,28 +296,47 @@ export default function App() {
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1">Room ID</label>
-              <input
-                type="text" required
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-                placeholder="Enter room code..."
-                value={roomId}
-                onChange={(e) => setRoomId(e.target.value)}
-              />
+
+            {/* JOIN EXISTING ROOM */}
+            <form onSubmit={handleJoinRoom} className="space-y-4 pt-2">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Join Existing Room</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text" required
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                    placeholder="Enter Room ID..."
+                    value={roomId}
+                    onChange={(e) => setRoomId(e.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition-colors shadow-lg shadow-blue-900/20"
+                  >
+                    Join
+                  </button>
+                </div>
+              </div>
+            </form>
+
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-800"></span></div>
+              <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">Or Host a New Party</span></div>
             </div>
-            <button
-              type="submit"
-              className="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-lg transition-colors shadow-lg shadow-blue-900/20"
-            >
-              Start Watching
-            </button>
-          </form>
+
+            {/* HOST NEW ROOM */}
+            <label className="flex items-center justify-center w-full px-4 py-4 bg-slate-800 border-2 border-dashed border-slate-700 rounded-xl cursor-pointer hover:border-blue-500 hover:bg-slate-800/80 transition-all shadow-lg">
+              <Video className="mr-3 text-blue-400" size={24} />
+              <span className="text-slate-200 font-medium">Select Video & Create Room</span>
+              <input type="file" className="hidden" accept="video/*" onChange={handleHostNewRoom} />
+            </label>
+          </div>
         </div>
       </div>
     );
   }
 
+  // MAIN WATCH PARTY ROOM
   return (
     <div className="flex h-screen bg-black text-slate-100 overflow-hidden font-sans">
       {/* MAIN PLAYER AREA */}
@@ -352,14 +352,9 @@ export default function App() {
             />
           ) : (
             <div className="text-center p-8">
-              <label className="cursor-pointer inline-flex flex-col items-center">
-                <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center hover:bg-slate-700 transition-colors mb-4">
-                    <Video size={32} className="text-blue-500" />
-                </div>
-                <h2 className="text-xl font-medium text-slate-300 hover:text-white transition-colors">Select Local Video to Host</h2>
-                <input type="file" className="hidden" accept="video/*" onChange={handleFileUpload} />
-              </label>
-              <p className="text-slate-600 mt-2 text-sm">Note: Only the host's video state is synced.</p>
+              <Video size={64} className="mx-auto text-slate-700 mb-4" />
+              <h2 className="text-xl font-medium text-slate-400">Waiting for Host</h2>
+              <p className="text-slate-600 mt-2">The host has not started the video yet.</p>
             </div>
           )}
 
@@ -387,7 +382,7 @@ export default function App() {
                 <div className="flex items-center gap-4">
                   <button onClick={copyRoomLink} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-sm transition-all">
                     {copySuccess ? <Check size={16} className="text-green-400" /> : <Share2 size={16} />}
-                    {copySuccess ? 'Copied!' : 'Invite Friends'}
+                    {copySuccess ? 'Copied!' : `Room: ${roomId}`}
                   </button>
                   <button onClick={leaveRoom} className="text-slate-400 hover:text-red-400 transition-colors">
                     <LogOut size={24} />
@@ -400,8 +395,8 @@ export default function App() {
       </div>
 
       {/* SOCIAL SIDEBAR */}
-      <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl">
-        <div className="p-4 border-b border-slate-800">
+      <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl z-10">
+        <div className="p-4 border-b border-slate-800 bg-slate-900">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold flex items-center gap-2">
               <Users size={18} className="text-blue-400" />
@@ -435,7 +430,7 @@ export default function App() {
         </div>
 
         {/* CHAT AREA */}
-        <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 flex flex-col min-h-0 bg-slate-900">
           <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
             {messages.length === 0 && (
                 <div className="text-center py-10 opacity-30">
@@ -457,7 +452,7 @@ export default function App() {
             ))}
           </div>
 
-          <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-900">
+          <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-900 pb-6">
             <div className="flex gap-2">
               <input 
                 type="text" 
@@ -472,18 +467,18 @@ export default function App() {
             </div>
             
             {/* WEBRTC MEDIA TOGGLES */}
-            <div className="flex justify-center gap-6 mt-4 pt-2">
+            <div className="flex justify-center gap-8 mt-5">
                <button 
                   type="button" 
                   onClick={() => toggleMedia('video')}
-                  className={`transition-colors ${isCameraOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
+                  className={`transition-colors p-2 rounded-full hover:bg-slate-800 ${isCameraOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
                 >
                   {isCameraOn ? <Video size={20} /> : <VideoOff size={20} />}
                </button>
                <button 
                   type="button" 
                   onClick={() => toggleMedia('audio')}
-                  className={`transition-colors ${isMicOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
+                  className={`transition-colors p-2 rounded-full hover:bg-slate-800 ${isMicOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
                 >
                   {isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
                </button>
@@ -498,13 +493,10 @@ export default function App() {
 // Sub-component to handle React rendering of incoming streams
 const RemoteVideo = ({ peer, username }) => {
   const ref = useRef();
-  const [hasVideo, setHasVideo] = useState(false);
 
   useEffect(() => {
     peer.on("stream", stream => {
       ref.current.srcObject = stream;
-      // Check if the stream actually has active video tracks
-      setHasVideo(stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled);
     });
   }, [peer]);
 
