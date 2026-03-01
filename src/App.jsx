@@ -6,8 +6,9 @@ import {
   Send, Share2, Settings, Monitor, LogOut, Check
 } from 'lucide-react';
 
-// IMPORTANT: Replace this with your actual Render URL!
-const SOCKET_URL = "https://mywatchparty-backend-xyz.onrender.com"; 
+// 🚨 CRITICAL FIX: Put your RENDER (Backend) link here, NOT your Vercel link! 
+// Ensure it starts with https://
+const SOCKET_URL = "https://mywatchparty-client-9nm5spwlp-navneet2222s-projects.vercel.app/"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
 export default function App() {
@@ -19,7 +20,7 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoFile, setVideoFile] = useState(null);
-  const [pendingVideoFile, setPendingVideoFile] = useState(null); // Added for the new UI flow
+  const [pendingVideoFile, setPendingVideoFile] = useState(null); 
   
   // Chat & UI State
   const [messages, setMessages] = useState([]);
@@ -199,7 +200,6 @@ export default function App() {
     }
   };
 
-  // --- NEW, ROBUST HOSTING LOGIC ---
   const handleCreateRoom = (e) => {
     e.preventDefault();
     
@@ -214,7 +214,6 @@ export default function App() {
     }
 
     try {
-      // Generate a random 6-character room ID
       const generatedRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       const url = URL.createObjectURL(pendingVideoFile);
       
@@ -303,7 +302,6 @@ export default function App() {
           </div>
 
           <div className="space-y-6">
-            {/* Global Name Input */}
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">Your Name</label>
               <input
@@ -316,7 +314,6 @@ export default function App() {
 
             <div className="border-t border-slate-800 pt-6"></div>
 
-            {/* OPTION 1: JOIN EXISTING ROOM */}
             <form onSubmit={handleJoinRoom}>
               <label className="block text-sm font-medium text-slate-300 mb-1">Join Existing Room</label>
               <div className="flex gap-2">
@@ -341,7 +338,6 @@ export default function App() {
               <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">OR HOST A NEW PARTY</span></div>
             </div>
 
-            {/* OPTION 2: HOST NEW ROOM */}
             <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
               <input 
                 type="file" 
@@ -367,7 +363,6 @@ export default function App() {
                 2. Create Room & Host
               </button>
             </div>
-
           </div>
         </div>
       </div>
@@ -380,7 +375,8 @@ export default function App() {
       {/* MAIN PLAYER AREA */}
       <div className="flex-1 flex flex-col relative group">
         <div className="flex-1 bg-black flex items-center justify-center relative">
-          {videoFile ? (
+         {/* FIX: Removed the duplicate JSX error block here */}
+         {videoFile ? (
             <video 
               ref={videoRef} src={videoFile}
               className="max-h-full w-full"
@@ -390,9 +386,21 @@ export default function App() {
             />
           ) : (
             <div className="text-center p-8">
-              <Video size={64} className="mx-auto text-slate-700 mb-4" />
-              <h2 className="text-xl font-medium text-slate-400">Waiting for Host</h2>
-              <p className="text-slate-600 mt-2">The host has not started the video yet.</p>
+              <label className="cursor-pointer inline-flex flex-col items-center">
+                <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center hover:bg-slate-700 transition-colors mb-4 shadow-xl">
+                    <Video size={32} className="text-blue-500" />
+                </div>
+                <h2 className="text-2xl font-medium text-slate-200 hover:text-white transition-colors">Select the Movie File</h2>
+                <input type="file" className="hidden" accept="video/*" onChange={(e) => {
+                   const file = e.target.files[0];
+                   if (file) setVideoFile(URL.createObjectURL(file));
+                }} />
+              </label>
+              <div className="mt-6 max-w-md mx-auto bg-blue-900/20 border border-blue-500/30 p-4 rounded-lg">
+                <p className="text-blue-200 text-sm">
+                  <strong>Zero-Lag Sync:</strong> To prevent buffering, the video is played locally. Please select the exact same video file as the host. We will automatically sync your play and pause times!
+                </p>
+              </div>
             </div>
           )}
 

@@ -8,4 +8,7 @@ export default defineConfig({
     tailwindcss(),
     react()
   ],
+  define: {
+    global: 'window', // This prevents simple-peer from crashing in Vite
+  },
 })
