@@ -1,49 +1,70 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
+import Peer from 'simple-peer';
 import { 
   Play, Pause, Users, Video, VideoOff, Mic, MicOff, 
   Send, Share2, Settings, Monitor, LogOut, Check
 } from 'lucide-react';
 
-// Connect to your local backend server
-const SOCKET_URL = "http://localhost:3001";
+// IMPORTANT: Replace this with your actual Render URL!
+const SOCKET_URL = "https://mywatchparty-backend-xyz.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
 export default function App() {
   const [roomId, setRoomId] = useState('');
   const [username, setUsername] = useState('User_' + Math.floor(Math.random() * 1000));
   const [inRoom, setInRoom] = useState(false);
+  
+  // Video Sync State
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [participants, setParticipants] = useState([]);
+  const [videoFile, setVideoFile] = useState(null);
+  
+  // Chat & UI State
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
-  const [videoFile, setVideoFile] = useState(null);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [roomParticipants, setRoomParticipants] = useState([]); // Basic socket users
   
-  const videoRef = useRef(null);
+  // WebRTC State
+  const [peers, setPeers] = useState([]); // Active video/audio connections
+  const [localStream, setLocalStream] = useState(null);
+  const [isCameraOn, setIsCameraOn] = useState(false);
+  const [isMicOn, setIsMicOn] = useState(false);
 
-  // --- Socket Event Listeners ---
+  const videoRef = useRef(null);
+  const userVideoRef = useRef(null);
+  const peersRef = useRef([]);
+
+  // --- 1. CORE SOCKET EVENT LISTENERS ---
   useEffect(() => {
     socket.on('user-joined', (user) => {
-      setParticipants(prev => [...prev, { ...user, isCameraOn: false, isMicOn: false }]);
+      setRoomParticipants(prev => [...prev, user]);
       addSystemMessage(`${user.name} joined the party.`);
     });
 
     socket.on('room-state', (state) => {
-      const formattedParticipants = state.participants.map(p => ({
-        ...p, isCameraOn: false, isMicOn: false
-      }));
-      setParticipants(formattedParticipants);
+      setRoomParticipants(state.participants);
+    });
+
+    socket.on('user-disconnected', (userId) => {
+      setRoomParticipants(prev => prev.filter(p => p.id !== userId));
+      
+      // Remove peer connection if they were on video
+      const peerObj = peersRef.current.find(p => p.peerID === userId);
+      if (peerObj) peerObj.peer.destroy();
+      
+      const peersData = peersRef.current.filter(p => p.peerID !== userId);
+      peersRef.current = peersData;
+      setPeers(peersData);
     });
 
     socket.on('sync-play', (data) => {
       if (videoRef.current) {
-        // Sync time before playing to prevent rubber-banding
         if (Math.abs(videoRef.current.currentTime - data.currentTime) > 1) {
           videoRef.current.currentTime = data.currentTime;
         }
-        videoRef.current.play();
+        videoRef.current.play().catch(e => console.log("Play prevented:", e));
         setIsPlaying(true);
       }
     });
@@ -69,6 +90,7 @@ export default function App() {
     return () => {
       socket.off('user-joined');
       socket.off('room-state');
+      socket.off('user-disconnected');
       socket.off('sync-play');
       socket.off('sync-pause');
       socket.off('sync-seek');
@@ -76,7 +98,126 @@ export default function App() {
     };
   }, []);
 
-  // --- UI Handlers ---
+  // --- 2. WEBRTC SIGNALING LISTENERS ---
+  useEffect(() => {
+    // When someone else turns on their camera and calls us
+    socket.on('user-joined-rtc', payload => {
+      // Only answer if we have already enabled our own media stream
+      if (localStream) {
+        const peer = addPeer(payload.signal, payload.callerID, localStream);
+        const newPeerObj = {
+          peerID: payload.callerID,
+          peer,
+          username: payload.username
+        };
+        peersRef.current.push(newPeerObj);
+        setPeers([...peersRef.current]);
+      }
+    });
+
+    // When someone answers our call
+    socket.on('receiving-returned-signal', payload => {
+      const item = peersRef.current.find(p => p.peerID === payload.id);
+      if (item) {
+        item.peer.signal(payload.signal);
+      }
+    });
+
+    return () => {
+      socket.off('user-joined-rtc');
+      socket.off('receiving-returned-signal');
+    };
+  }, [localStream]);
+
+  // --- 3. MEDIA CAPTURE & PEER CREATION ---
+  const toggleMedia = async (type) => {
+    try {
+      // If we don't have a stream yet, ask for permission
+      if (!localStream) {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        
+        // Start with tracks disabled until user explicitly clicks the button
+        stream.getVideoTracks()[0].enabled = type === 'video';
+        stream.getAudioTracks()[0].enabled = type === 'audio';
+        
+        setLocalStream(stream);
+        setIsCameraOn(type === 'video');
+        setIsMicOn(type === 'audio');
+        
+        if (userVideoRef.current) {
+          userVideoRef.current.srcObject = stream;
+        }
+
+        // Call everyone currently in the room
+        const peers = [];
+        roomParticipants.forEach(user => {
+          if (user.id !== socket.id) {
+            const peer = createPeer(user.id, socket.id, stream);
+            peersRef.current.push({
+              peerID: user.id,
+              peer,
+              username: user.name
+            });
+            peers.push({
+              peerID: user.id,
+              peer,
+              username: user.name
+            });
+          }
+        });
+        setPeers(peers);
+
+      } else {
+        // We already have the stream, just toggle the track
+        if (type === 'video') {
+          localStream.getVideoTracks()[0].enabled = !isCameraOn;
+          setIsCameraOn(!isCameraOn);
+        } else if (type === 'audio') {
+          localStream.getAudioTracks()[0].enabled = !isMicOn;
+          setIsMicOn(!isMicOn);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to get local media", err);
+      addSystemMessage("Could not access camera or microphone. Please check permissions.");
+    }
+  };
+
+  const createPeer = (userToSignal, callerID, stream) => {
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream,
+    });
+
+    peer.on('signal', signal => {
+      socket.emit('sending-signal', {
+        userToSignal,
+        callerID,
+        signal,
+        username
+      });
+    });
+
+    return peer;
+  };
+
+  const addPeer = (incomingSignal, callerID, stream) => {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+    });
+
+    peer.on('signal', signal => {
+      socket.emit('returning-signal', { signal, callerID });
+    });
+
+    peer.signal(incomingSignal);
+    return peer;
+  };
+
+  // --- 4. UI HANDLERS ---
   const handleJoinRoom = (e) => {
     e.preventDefault();
     if (roomId && username) {
@@ -99,24 +240,20 @@ export default function App() {
     navigator.clipboard.writeText(link).then(() => {
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
-    }).catch(err => {
-      console.error('Failed to copy link: ', err);
     });
   };
 
   const addSystemMessage = (text) => {
     setMessages(prev => [...prev, { 
-      sender: 'System', 
-      text, 
+      sender: 'System', text, 
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       isSystem: true 
     }]);
   };
 
-  // --- Video Sync Logic ---
+  // --- 5. VIDEO SYNC HANDLERS ---
   const togglePlay = () => {
     if (!videoRef.current) return;
-    
     if (isPlaying) {
       videoRef.current.pause();
       socket.emit('video-pause', { roomId });
@@ -139,26 +276,23 @@ export default function App() {
   const handleSendMessage = (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
-    
     const msgData = { 
-      roomId,
-      sender: username, 
-      text: chatInput, 
+      roomId, sender: username, text: chatInput, 
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
     };
-    
     socket.emit('send-message', msgData);
     setChatInput('');
   };
 
   const leaveRoom = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
     socket.disconnect();
-    setInRoom(false);
-    setVideoFile(null);
-    setMessages([]);
-    setParticipants([]);
+    window.location.reload(); // Quickest way to clean up WebRTC state for MVP
   };
 
+  // --- RENDER SCREENS ---
   if (!inRoom) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans text-slate-100">
@@ -175,8 +309,7 @@ export default function App() {
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">Your Name</label>
               <input
-                type="text"
-                required
+                type="text" required
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -185,8 +318,7 @@ export default function App() {
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">Room ID</label>
               <input
-                type="text"
-                required
+                type="text" required
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                 placeholder="Enter room code..."
                 value={roomId}
@@ -207,13 +339,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-black text-slate-100 overflow-hidden font-sans">
-      {/* Main Player Area */}
+      {/* MAIN PLAYER AREA */}
       <div className="flex-1 flex flex-col relative group">
         <div className="flex-1 bg-black flex items-center justify-center relative">
           {videoFile ? (
             <video 
-              ref={videoRef}
-              src={videoFile}
+              ref={videoRef} src={videoFile}
               className="max-h-full w-full"
               onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
               onPlay={() => setIsPlaying(true)}
@@ -232,16 +363,14 @@ export default function App() {
             </div>
           )}
 
-          {/* Video Controls Overlay */}
+          {/* VIDEO CONTROLS OVERLAY */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/90 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
             <div className="space-y-4">
               <input 
                 type="range" 
                 className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                min="0"
-                max={videoRef.current?.duration || 100}
-                value={currentTime}
-                onChange={handleSeek}
+                min="0" max={videoRef.current?.duration || 100}
+                value={currentTime} onChange={handleSeek}
               />
               
               <div className="flex items-center justify-between">
@@ -270,36 +399,42 @@ export default function App() {
         </div>
       </div>
 
-      {/* Social Sidebar */}
+      {/* SOCIAL SIDEBAR */}
       <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl">
-        {/* Participants Grid */}
         <div className="p-4 border-b border-slate-800">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold flex items-center gap-2">
               <Users size={18} className="text-blue-400" />
-              Watchers ({participants.length})
+              Watchers ({roomParticipants.length})
             </h3>
             <Settings size={18} className="text-slate-500 cursor-pointer hover:text-white" />
           </div>
           
           <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto scrollbar-hide">
-            {participants.map((p, index) => (
-              <div key={index} className="aspect-video bg-slate-800 rounded-lg relative overflow-hidden ring-1 ring-slate-700">
+            {/* Local User Video */}
+            <div className="aspect-video bg-slate-800 rounded-lg relative overflow-hidden ring-1 ring-slate-700">
+              <video playsInline muted autoPlay ref={userVideoRef} className={`w-full h-full object-cover ${!isCameraOn && 'hidden'}`} />
+              {!isCameraOn && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-800/50">
-                   {!p.isCameraOn && <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">{p.name[0]}</div>}
+                  <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">{username[0]}</div>
                 </div>
-                <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1">
-                  <span className="text-[10px] truncate max-w-[50px] bg-black/50 px-1 rounded">{p.name}</span>
-                  <div className="flex gap-1">
-                    {p.isMicOn ? <Mic size={10} className="text-blue-400" /> : <MicOff size={10} className="text-slate-500" />}
-                  </div>
+              )}
+              <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1">
+                <span className="text-[10px] truncate max-w-[50px] bg-black/50 px-1 rounded">You</span>
+                <div className="flex gap-1">
+                  {isMicOn ? <Mic size={10} className="text-blue-400" /> : <MicOff size={10} className="text-slate-500" />}
                 </div>
               </div>
+            </div>
+
+            {/* Remote Peer Videos */}
+            {peers.map((peerObj, index) => (
+              <RemoteVideo key={index} peer={peerObj.peer} username={peerObj.username} />
             ))}
           </div>
         </div>
 
-        {/* Chat Area */}
+        {/* CHAT AREA */}
         <div className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
             {messages.length === 0 && (
@@ -336,12 +471,21 @@ export default function App() {
               </button>
             </div>
             
+            {/* WEBRTC MEDIA TOGGLES */}
             <div className="flex justify-center gap-6 mt-4 pt-2">
-               <button type="button" className="text-slate-400 hover:text-blue-400 transition-colors">
-                  <Video size={20} />
+               <button 
+                  type="button" 
+                  onClick={() => toggleMedia('video')}
+                  className={`transition-colors ${isCameraOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
+                >
+                  {isCameraOn ? <Video size={20} /> : <VideoOff size={20} />}
                </button>
-               <button type="button" className="text-slate-400 hover:text-blue-400 transition-colors">
-                  <Mic size={20} />
+               <button 
+                  type="button" 
+                  onClick={() => toggleMedia('audio')}
+                  className={`transition-colors ${isMicOn ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`}
+                >
+                  {isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
                </button>
             </div>
           </form>
@@ -350,3 +494,26 @@ export default function App() {
     </div>
   );
 }
+
+// Sub-component to handle React rendering of incoming streams
+const RemoteVideo = ({ peer, username }) => {
+  const ref = useRef();
+  const [hasVideo, setHasVideo] = useState(false);
+
+  useEffect(() => {
+    peer.on("stream", stream => {
+      ref.current.srcObject = stream;
+      // Check if the stream actually has active video tracks
+      setHasVideo(stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled);
+    });
+  }, [peer]);
+
+  return (
+    <div className="aspect-video bg-slate-800 rounded-lg relative overflow-hidden ring-1 ring-slate-700">
+      <video playsInline autoPlay ref={ref} className="w-full h-full object-cover" />
+      <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1">
+        <span className="text-[10px] truncate max-w-[50px] bg-black/50 px-1 rounded">{username}</span>
+      </div>
+    </div>
+  );
+};
