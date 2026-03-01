@@ -6,7 +6,7 @@ import {
   Send, Share2, Settings, Monitor, LogOut, Check
 } from 'lucide-react';
 
-// IMPORTANT: Replace this with your actual Render URL before deploying to Vercel!
+// IMPORTANT: Replace this with your actual Render URL!
 const SOCKET_URL = "https://mywatchparty-backend-xyz.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
@@ -19,6 +19,7 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoFile, setVideoFile] = useState(null);
+  const [pendingVideoFile, setPendingVideoFile] = useState(null); // Added for the new UI flow
   
   // Chat & UI State
   const [messages, setMessages] = useState([]);
@@ -163,7 +164,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to get local media", err);
-      addSystemMessage("Could not access camera or microphone. Please check permissions.");
+      alert("Could not access camera or microphone. Please check your browser permissions.");
     }
   };
 
@@ -187,6 +188,10 @@ export default function App() {
   // --- 4. UI HANDLERS (JOIN & HOST) ---
   const handleJoinRoom = (e) => {
     e.preventDefault();
+    if (!username.trim()) {
+      alert("Please enter your name first!");
+      return;
+    }
     if (roomId && username.trim()) {
       socket.connect();
       socket.emit('join-room', roomId, username);
@@ -194,16 +199,24 @@ export default function App() {
     }
   };
 
-  const handleHostNewRoom = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      if (!username.trim()) {
-        alert("Please enter your name first!");
-        return;
-      }
+  // --- NEW, ROBUST HOSTING LOGIC ---
+  const handleCreateRoom = (e) => {
+    e.preventDefault();
+    
+    if (!username.trim()) {
+      alert("Please enter your name first!");
+      return;
+    }
+    
+    if (!pendingVideoFile) {
+      alert("Please select a video file before creating a room!");
+      return;
+    }
+
+    try {
       // Generate a random 6-character room ID
       const generatedRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-      const url = URL.createObjectURL(file);
+      const url = URL.createObjectURL(pendingVideoFile);
       
       setVideoFile(url);
       setRoomId(generatedRoomId);
@@ -211,6 +224,9 @@ export default function App() {
       socket.connect();
       socket.emit('join-room', generatedRoomId, username);
       setInRoom(true);
+    } catch (error) {
+      console.error("Room creation error:", error);
+      alert("An error occurred while creating the room. Please try again.");
     }
   };
 
@@ -277,8 +293,8 @@ export default function App() {
   if (!inRoom) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans text-slate-100">
-        <div className="max-w-md w-full space-y-8 bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-2xl">
-          <div className="text-center">
+        <div className="max-w-md w-full bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-2xl">
+          <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-xl mb-4">
               <Monitor size={32} className="text-white" />
             </div>
@@ -286,7 +302,8 @@ export default function App() {
             <p className="mt-2 text-slate-400">Sync movies, share moments.</p>
           </div>
 
-          <div className="mt-8 space-y-4">
+          <div className="space-y-6">
+            {/* Global Name Input */}
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">Your Name</label>
               <input
@@ -297,39 +314,60 @@ export default function App() {
               />
             </div>
 
-            {/* JOIN EXISTING ROOM */}
-            <form onSubmit={handleJoinRoom} className="space-y-4 pt-2">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Join Existing Room</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text" required
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-                    placeholder="Enter Room ID..."
-                    value={roomId}
-                    onChange={(e) => setRoomId(e.target.value)}
-                  />
-                  <button
-                    type="submit"
-                    className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition-colors shadow-lg shadow-blue-900/20"
-                  >
-                    Join
-                  </button>
-                </div>
+            <div className="border-t border-slate-800 pt-6"></div>
+
+            {/* OPTION 1: JOIN EXISTING ROOM */}
+            <form onSubmit={handleJoinRoom}>
+              <label className="block text-sm font-medium text-slate-300 mb-1">Join Existing Room</label>
+              <div className="flex gap-2">
+                <input
+                  type="text" required
+                  className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  placeholder="Enter Room ID..."
+                  value={roomId}
+                  onChange={(e) => setRoomId(e.target.value)}
+                />
+                <button
+                  type="submit"
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition-colors shadow-lg"
+                >
+                  Join
+                </button>
               </div>
             </form>
 
             <div className="relative my-6">
               <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-800"></span></div>
-              <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">Or Host a New Party</span></div>
+              <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">OR HOST A NEW PARTY</span></div>
             </div>
 
-            {/* HOST NEW ROOM */}
-            <label className="flex items-center justify-center w-full px-4 py-4 bg-slate-800 border-2 border-dashed border-slate-700 rounded-xl cursor-pointer hover:border-blue-500 hover:bg-slate-800/80 transition-all shadow-lg">
-              <Video className="mr-3 text-blue-400" size={24} />
-              <span className="text-slate-200 font-medium">Select Video & Create Room</span>
-              <input type="file" className="hidden" accept="video/*" onChange={handleHostNewRoom} />
-            </label>
+            {/* OPTION 2: HOST NEW ROOM */}
+            <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+              <input 
+                type="file" 
+                id="video-upload"
+                className="hidden" 
+                accept="video/*" 
+                onChange={(e) => setPendingVideoFile(e.target.files[0])} 
+              />
+              <label 
+                htmlFor="video-upload"
+                className="flex items-center justify-center w-full px-4 py-3 bg-slate-800 border-2 border-dashed border-slate-600 rounded-lg cursor-pointer hover:border-blue-500 transition-all mb-4"
+              >
+                <Video className="mr-2 text-blue-400" size={20} />
+                <span className="text-sm text-slate-200 truncate">
+                  {pendingVideoFile ? pendingVideoFile.name : "1. Choose Local Video"}
+                </span>
+              </label>
+
+              <button
+                onClick={handleCreateRoom}
+                className="w-full bg-green-600 hover:bg-green-500 text-white font-semibold py-3 rounded-lg transition-colors shadow-lg"
+              >
+                2. Create Room & Host
+              </button>
+            </div>
+
           </div>
         </div>
       </div>
