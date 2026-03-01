@@ -8,7 +8,7 @@ import {
 
 // 🚨 CRITICAL FIX: Put your RENDER (Backend) link here, NOT your Vercel link! 
 // Ensure it starts with https://
-const SOCKET_URL = "https://mywatchparty-client-9nm5spwlp-navneet2222s-projects.vercel.app/"; 
+const SOCKET_URL = "https://mywatchparty-backend.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
 export default function App() {
