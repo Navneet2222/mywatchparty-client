@@ -11,21 +11,32 @@ import {
 const SOCKET_URL = "https://mywatchparty-backend.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
-// Custom Native WebRTC wrapper (Fixes the Vercel build crash!)
+// Robust Native WebRTC wrapper
 class NativePeer {
   constructor({ initiator, stream }) {
     this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
     this.callbacks = { signal: [], stream: [] };
-    if (stream) stream.getTracks().forEach(track => this.pc.addTrack(track, stream));
+    
+    if (stream) {
+      stream.getTracks().forEach(track => this.pc.addTrack(track, stream));
+    }
+
     this.pc.onicecandidate = (e) => { if (e.candidate) this.emit('signal', { type: 'candidate', candidate: e.candidate }); };
-    this.pc.ontrack = (e) => { if (e.streams && e.streams[0]) this.emit('stream', e.streams[0]); };
+    
+    this.pc.ontrack = (e) => { 
+      if (e.streams && e.streams[0]) this.emit('stream', e.streams[0]); 
+      else this.emit('stream', new MediaStream([e.track])); 
+    };
+
     if (initiator) {
       this.pc.createOffer().then(offer => this.pc.setLocalDescription(offer))
         .then(() => this.emit('signal', { type: 'sdp', sdp: this.pc.localDescription })).catch(console.error);
     }
   }
+
   on(event, cb) { if (!this.callbacks[event]) this.callbacks[event] = []; this.callbacks[event].push(cb); }
   emit(event, data) { if (this.callbacks[event]) this.callbacks[event].forEach(cb => cb(data)); }
+  
   signal(data) {
     if (!data) return;
     if (data.type === 'sdp' || data.sdp) {
@@ -38,6 +49,15 @@ class NativePeer {
       this.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(console.error);
     }
   }
+  
+  addStream(stream) {
+    stream.getTracks().forEach(track => {
+      const sender = this.pc.getSenders().find(s => s.track?.kind === track.kind);
+      if (sender) sender.replaceTrack(track);
+      else this.pc.addTrack(track, stream);
+    });
+  }
+
   destroy() { this.pc.close(); }
 }
 
@@ -47,14 +67,14 @@ export default function App() {
   const [inRoom, setInRoom] = useState(false);
   
   // Hosting Inputs State
-  const [hostMode, setHostMode] = useState('cloud'); // 'cloud', 'hosted', 'local'
+  const [hostMode, setHostMode] = useState('cloud'); 
   const [cloudUrlInput, setCloudUrlInput] = useState('');
   const [pendingVideoFile, setPendingVideoFile] = useState(null); 
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   
   // Room Video State
-  const [videoConfig, setVideoConfig] = useState(null); // { type: 'cloud'|'hosted'|'local', url: '...' }
+  const [videoConfig, setVideoConfig] = useState(null); 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -73,21 +93,40 @@ export default function App() {
   const reactPlayerRef = useRef(null);
   const userVideoRef = useRef(null);
   const peersRef = useRef([]);
+  
+  // SYNC LOCKS (Prevents rubber-banding and echo loops)
+  const isRemoteSync = useRef(false);
+  const localStreamRef = useRef(null);
+
+  // Helper: Auto-converts Google Drive Webpage links to Raw Video Links
+  const processCloudUrl = (url) => {
+    if (url.includes('drive.google.com/file/d/')) {
+      const match = url.match(/file\/d\/([a-zA-Z0-9_-]+)/);
+      if (match) return `https://drive.google.com/uc?export=download&id=${match[1]}`;
+    }
+    return url;
+  };
 
   // --- 1. CORE SOCKET EVENT LISTENERS ---
   useEffect(() => {
     socket.on('user-joined', (user) => {
       setRoomParticipants(prev => [...prev, user]);
       addSystemMessage(`${user.name} joined the party.`);
+      
+      // If we are already broadcasting media, automatically call the new user
+      if (localStreamRef.current) {
+        const peer = createPeer(user.id, socket.id, localStreamRef.current);
+        peersRef.current.push({ peerID: user.id, peer, username: user.name });
+        setPeers([...peersRef.current]);
+      }
     });
 
     socket.on('room-state', (state) => {
       setRoomParticipants(state.participants);
-      // Auto-configure the guest's player!
       if (state.videoState && state.videoState.type !== 'local') {
          setVideoConfig(state.videoState);
       } else if (state.videoState && state.videoState.type === 'local') {
-         setVideoConfig({ type: 'local', url: null }); // Force local file selection
+         setVideoConfig({ type: 'local', url: null }); 
       }
     });
 
@@ -100,26 +139,33 @@ export default function App() {
       setPeers(peersData);
     });
 
+    // 100% Accurate Video Sync Listeners
     socket.on('sync-play', (data) => {
+      isRemoteSync.current = true;
       if (videoRef.current) {
-        if (Math.abs(videoRef.current.currentTime - data.currentTime) > 1) videoRef.current.currentTime = data.currentTime;
+        if (Math.abs(videoRef.current.currentTime - data.currentTime) > 0.5) videoRef.current.currentTime = data.currentTime;
         videoRef.current.play().catch(e => console.log(e));
       }
       if (reactPlayerRef.current) {
-        if (Math.abs(reactPlayerRef.current.getCurrentTime() - data.currentTime) > 1) reactPlayerRef.current.seekTo(data.currentTime);
+        if (Math.abs(reactPlayerRef.current.getCurrentTime() - data.currentTime) > 0.5) reactPlayerRef.current.seekTo(data.currentTime, 'seconds');
       }
       setIsPlaying(true);
+      setTimeout(() => { isRemoteSync.current = false; }, 500);
     });
 
     socket.on('sync-pause', () => {
+      isRemoteSync.current = true;
       if (videoRef.current) videoRef.current.pause();
       setIsPlaying(false);
+      setTimeout(() => { isRemoteSync.current = false; }, 500);
     });
 
     socket.on('sync-seek', (time) => {
+      isRemoteSync.current = true;
       if (videoRef.current) videoRef.current.currentTime = time;
-      if (reactPlayerRef.current) reactPlayerRef.current.seekTo(time);
+      if (reactPlayerRef.current) reactPlayerRef.current.seekTo(time, 'seconds');
       setCurrentTime(time);
+      setTimeout(() => { isRemoteSync.current = false; }, 500);
     });
 
     socket.on('new-message', (msg) => setMessages(prev => [...prev, msg]));
@@ -133,40 +179,56 @@ export default function App() {
   // --- 2. WEBRTC MEDIA & PEERS ---
   useEffect(() => {
     socket.on('user-joined-rtc', payload => {
-      if (localStream) {
-        const peer = addPeer(payload.signal, payload.callerID, localStream);
-        peersRef.current.push({ peerID: payload.callerID, peer, username: payload.username });
-        setPeers([...peersRef.current]);
-      }
+      // FIX: Accept incoming calls EVEN IF we don't have our camera on yet
+      const peer = addPeer(payload.signal, payload.callerID, localStreamRef.current);
+      peersRef.current.push({ peerID: payload.callerID, peer, username: payload.username });
+      setPeers([...peersRef.current]);
     });
+
     socket.on('receiving-returned-signal', payload => {
       const item = peersRef.current.find(p => p.peerID === payload.id);
       if (item) item.peer.signal(payload.signal);
     });
+
     return () => { socket.off('user-joined-rtc'); socket.off('receiving-returned-signal'); };
-  }, [localStream]);
+  }, []);
 
   const toggleMedia = async (type) => {
     try {
-      if (!localStream) {
+      if (!localStreamRef.current) {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         stream.getVideoTracks()[0].enabled = type === 'video';
         stream.getAudioTracks()[0].enabled = type === 'audio';
-        setLocalStream(stream); setIsCameraOn(type === 'video'); setIsMicOn(type === 'audio');
+        
+        setLocalStream(stream);
+        localStreamRef.current = stream;
+        setIsCameraOn(type === 'video'); 
+        setIsMicOn(type === 'audio');
+        
         if (userVideoRef.current) userVideoRef.current.srcObject = stream;
 
-        const newPeers = [];
+        // Upgrade existing peer connections with our new stream
+        peersRef.current.forEach(p => p.peer.addStream(stream));
+
+        // Call anyone we aren't connected to yet
+        const existingPeerIds = peersRef.current.map(p => p.peerID);
         roomParticipants.forEach(user => {
-          if (user.id !== socket.id) {
+          if (user.id !== socket.id && !existingPeerIds.includes(user.id)) {
             const peer = createPeer(user.id, socket.id, stream);
             peersRef.current.push({ peerID: user.id, peer, username: user.name });
-            newPeers.push({ peerID: user.id, peer, username: user.name });
+            setPeers([...peersRef.current]);
           }
         });
-        setPeers(newPeers);
+
       } else {
-        if (type === 'video') { localStream.getVideoTracks()[0].enabled = !isCameraOn; setIsCameraOn(!isCameraOn); } 
-        else if (type === 'audio') { localStream.getAudioTracks()[0].enabled = !isMicOn; setIsMicOn(!isMicOn); }
+        if (type === 'video') { 
+          localStreamRef.current.getVideoTracks()[0].enabled = !isCameraOn; 
+          setIsCameraOn(!isCameraOn); 
+        } 
+        else if (type === 'audio') { 
+          localStreamRef.current.getAudioTracks()[0].enabled = !isMicOn; 
+          setIsMicOn(!isMicOn); 
+        }
       }
     } catch (err) { alert("Could not access camera/microphone."); }
   };
@@ -199,8 +261,10 @@ export default function App() {
     let initialVideoState = null;
 
     if (hostMode === 'cloud') {
-      if (!cloudUrlInput) return alert("Paste a YouTube or Video URL first!");
-      initialVideoState = { type: 'cloud', url: cloudUrlInput };
+      if (!cloudUrlInput) return alert("Paste a YouTube or Google Drive URL first!");
+      // Apply Google Drive auto-converter
+      const processedUrl = processCloudUrl(cloudUrlInput);
+      initialVideoState = { type: 'cloud', url: processedUrl };
       
     } else if (hostMode === 'hosted') {
       if (!pendingVideoFile) return alert("Select a video file to upload!");
@@ -218,7 +282,7 @@ export default function App() {
         initialVideoState = { type: 'hosted', url: `${SOCKET_URL}${data.url}` };
       } catch (err) {
         setIsUploading(false);
-        return alert("Failed to upload video to server. Is the backend running?");
+        return alert("Failed to upload video to server.");
       }
       setIsUploading(false);
 
@@ -237,30 +301,40 @@ export default function App() {
 
   const addSystemMessage = (text) => setMessages(prev => [...prev, { sender: 'System', text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), isSystem: true }]);
 
-  // --- 4. VIDEO SYNC HANDLERS ---
-  const togglePlay = () => {
-    const isActuallyPlaying = !isPlaying;
-    setIsPlaying(isActuallyPlaying);
-    
-    let cTime = currentTime;
-    if (videoConfig?.type === 'cloud' && reactPlayerRef.current) cTime = reactPlayerRef.current.getCurrentTime();
-    else if (videoRef.current) cTime = videoRef.current.currentTime;
+  // --- 4. 100% ACCURATE SYNC HANDLERS ---
+  const handleLocalPlay = () => {
+    if (isRemoteSync.current) return; // Ignore if triggered by socket
+    setIsPlaying(true);
+    let cTime = videoConfig?.type === 'cloud' && reactPlayerRef.current ? reactPlayerRef.current.getCurrentTime() : videoRef.current?.currentTime;
+    socket.emit('video-play', { roomId, currentTime: cTime || 0 });
+  };
 
-    if (isActuallyPlaying) {
-      if (videoRef.current) videoRef.current.play();
-      socket.emit('video-play', { roomId, currentTime: cTime });
-    } else {
+  const handleLocalPause = () => {
+    if (isRemoteSync.current) return;
+    setIsPlaying(false);
+    socket.emit('video-pause', { roomId });
+  };
+
+  const handleUIPlayPauseToggle = () => {
+    if (isPlaying) {
       if (videoRef.current) videoRef.current.pause();
-      socket.emit('video-pause', { roomId });
+      handleLocalPause();
+    } else {
+      if (videoRef.current) videoRef.current.play();
+      handleLocalPlay();
     }
   };
 
   const handleSeek = (e) => {
     const time = parseFloat(e.target.value);
     setCurrentTime(time);
-    if (videoConfig?.type === 'cloud' && reactPlayerRef.current) reactPlayerRef.current.seekTo(time);
+    
+    if (videoConfig?.type === 'cloud' && reactPlayerRef.current) reactPlayerRef.current.seekTo(time, 'seconds');
     else if (videoRef.current) videoRef.current.currentTime = time;
-    socket.emit('video-seek', { roomId, currentTime: time });
+    
+    if (!isRemoteSync.current) {
+      socket.emit('video-seek', { roomId, currentTime: time });
+    }
   };
 
   // --- 5. RENDER SCREENS ---
@@ -283,7 +357,6 @@ export default function App() {
 
             <div className="border-t border-slate-800 pt-6"></div>
 
-            {/* JOIN ROOM */}
             <form onSubmit={handleJoinRoom}>
               <label className="block text-sm font-medium text-slate-300 mb-1">Join Existing Room</label>
               <div className="flex gap-2">
@@ -297,19 +370,16 @@ export default function App() {
               <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500">OR HOST A NEW PARTY</span></div>
             </div>
 
-            {/* HOSTING OPTIONS */}
             <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 space-y-4">
-              {/* Tabs */}
               <div className="flex bg-slate-900 rounded-lg p-1 gap-1">
                 <button onClick={() => setHostMode('cloud')} className={`flex-1 flex items-center justify-center py-2 text-xs font-medium rounded-md transition-all ${hostMode === 'cloud' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><Link size={14} className="mr-1"/> Cloud Link</button>
                 <button onClick={() => setHostMode('hosted')} className={`flex-1 flex items-center justify-center py-2 text-xs font-medium rounded-md transition-all ${hostMode === 'hosted' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><UploadCloud size={14} className="mr-1"/> Server 50MB</button>
                 <button onClick={() => setHostMode('local')} className={`flex-1 flex items-center justify-center py-2 text-xs font-medium rounded-md transition-all ${hostMode === 'local' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><HardDrive size={14} className="mr-1"/> Local Sync</button>
               </div>
 
-              {/* Tab Contents */}
               {hostMode === 'cloud' && (
                 <div>
-                  <input type="text" placeholder="Paste YouTube or MP4 Link..." className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white mb-2 outline-none" value={cloudUrlInput} onChange={(e) => setCloudUrlInput(e.target.value)} />
+                  <input type="text" placeholder="Paste YouTube or Google Drive Link..." className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white mb-2 outline-none" value={cloudUrlInput} onChange={(e) => setCloudUrlInput(e.target.value)} />
                   <p className="text-xs text-slate-400 mb-4">Plays instantly for everyone in the room.</p>
                 </div>
               )}
@@ -347,27 +417,27 @@ export default function App() {
     );
   }
 
-  // MAIN WATCH PARTY ROOM
   return (
     <div className="flex h-screen bg-black text-slate-100 overflow-hidden font-sans">
       <div className="flex-1 flex flex-col relative group">
         <div className="flex-1 bg-black flex items-center justify-center relative">
           
-          {/* THE DYNAMIC VIDEO PLAYER */}
           {videoConfig?.type === 'cloud' ? (
             <ReactPlayer 
               ref={reactPlayerRef} url={videoConfig.url} playing={isPlaying} 
               width="100%" height="100%" 
-              onProgress={(e) => setCurrentTime(e.playedSeconds)}
+              onProgress={(e) => !isRemoteSync.current && setCurrentTime(e.playedSeconds)}
               onDuration={setDuration}
+              onPlay={handleLocalPlay}
+              onPause={handleLocalPause}
               style={{ pointerEvents: 'none' }} 
             />
           ) : (videoConfig?.type === 'hosted' || (videoConfig?.type === 'local' && videoConfig?.url)) ? (
             <video 
               ref={videoRef} src={videoConfig.url} className="max-h-full w-full"
-              onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+              onTimeUpdate={() => !isRemoteSync.current && setCurrentTime(videoRef.current?.currentTime || 0)}
               onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)}
-              onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)}
+              onPlay={handleLocalPlay} onPause={handleLocalPause}
             />
           ) : (
              <div className="text-center p-8">
@@ -384,7 +454,6 @@ export default function App() {
             </div>
           )}
 
-          {/* CUSTOM VIDEO CONTROLS OVERLAY */}
           {videoConfig?.url && (
             <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/90 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
               <div className="space-y-4">
@@ -394,7 +463,7 @@ export default function App() {
                 />
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-6">
-                    <button onClick={togglePlay} className="hover:text-blue-400 transition-colors">
+                    <button onClick={handleUIPlayPauseToggle} className="hover:text-blue-400 transition-colors">
                       {isPlaying ? <Pause size={28} /> : <Play size={28} />}
                     </button>
                     <span className="text-sm font-mono">
@@ -416,7 +485,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* SOCIAL SIDEBAR */}
       <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl z-10">
         <div className="p-4 border-b border-slate-800 bg-slate-900">
           <div className="flex items-center justify-between mb-4">
@@ -436,7 +504,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* CHAT AREA */}
         <div className="flex-1 flex flex-col min-h-0 bg-slate-900">
           <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
             {messages.length === 0 && <div className="text-center py-10 opacity-30"><Send size={32} className="mx-auto mb-2" /><p className="text-xs">No messages yet</p></div>}
@@ -466,7 +533,11 @@ export default function App() {
 
 const RemoteVideo = ({ peer, username }) => {
   const ref = useRef();
-  useEffect(() => { peer.on("stream", stream => { ref.current.srcObject = stream; }); }, [peer]);
+  useEffect(() => { 
+    peer.on("stream", stream => { 
+       if (ref.current) ref.current.srcObject = stream; 
+    }); 
+  }, [peer]);
   return (
     <div className="aspect-video bg-slate-800 rounded-lg relative overflow-hidden ring-1 ring-slate-700">
       <video playsInline autoPlay ref={ref} className="w-full h-full object-cover" />
