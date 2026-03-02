@@ -3,87 +3,45 @@ import { io } from 'socket.io-client';
 import ReactPlayer from 'react-player';
 import { 
   Play, Pause, Users, Video, VideoOff, Mic, MicOff, 
-  Send, Share2, Settings, Monitor, LogOut, Check, Link, UploadCloud, HardDrive, AlertTriangle
+  Send, Share2, Settings, Monitor, LogOut, Check, Link, UploadCloud, HardDrive
 } from 'lucide-react';
 
 // 🚨 CRITICAL FIX: Put your RENDER (Backend) link here
+// Must look like: "https://mywatchparty-backend-xyz.onrender.com"
 const SOCKET_URL = "https://mywatchparty-backend.onrender.com"; 
 const socket = io(SOCKET_URL, { autoConnect: false });
 
-// Custom Native WebRTC wrapper to replace 'simple-peer'
-// This fixes build errors and removes the need for outdated dependencies.
+// Custom Native WebRTC wrapper (Fixes the Vercel build crash!)
 class NativePeer {
   constructor({ initiator, stream }) {
-    this.pc = new RTCPeerConnection({ 
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' }
-      ] 
-    });
+    this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
     this.callbacks = { signal: [], stream: [] };
-    
-    if (stream) {
-      stream.getTracks().forEach(track => this.pc.addTrack(track, stream));
-    }
-
-    this.pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        this.emit('signal', { type: 'candidate', candidate: e.candidate });
-      }
-    };
-
-    this.pc.ontrack = (e) => {
-      if (e.streams && e.streams[0]) {
-        this.emit('stream', e.streams[0]);
-      }
-    };
-
+    if (stream) stream.getTracks().forEach(track => this.pc.addTrack(track, stream));
+    this.pc.onicecandidate = (e) => { if (e.candidate) this.emit('signal', { type: 'candidate', candidate: e.candidate }); };
+    this.pc.ontrack = (e) => { if (e.streams && e.streams[0]) this.emit('stream', e.streams[0]); };
     if (initiator) {
-      this.pc.createOffer().then(offer => {
-        return this.pc.setLocalDescription(offer);
-      }).then(() => {
-        this.emit('signal', { type: 'sdp', sdp: this.pc.localDescription });
-      }).catch(console.error);
+      this.pc.createOffer().then(offer => this.pc.setLocalDescription(offer))
+        .then(() => this.emit('signal', { type: 'sdp', sdp: this.pc.localDescription })).catch(console.error);
     }
   }
-
-  on(event, cb) {
-    if (!this.callbacks[event]) this.callbacks[event] = [];
-    this.callbacks[event].push(cb);
-  }
-
-  emit(event, data) {
-    if (this.callbacks[event]) {
-      this.callbacks[event].forEach(cb => cb(data));
-    }
-  }
-
+  on(event, cb) { if (!this.callbacks[event]) this.callbacks[event] = []; this.callbacks[event].push(cb); }
+  emit(event, data) { if (this.callbacks[event]) this.callbacks[event].forEach(cb => cb(data)); }
   signal(data) {
     if (!data) return;
     if (data.type === 'sdp' || data.sdp) {
       this.pc.setRemoteDescription(new RTCSessionDescription(data.sdp || data)).then(() => {
-        if (this.pc.remoteDescription.type === 'offer') {
-          return this.pc.createAnswer();
-        }
+        if (this.pc.remoteDescription.type === 'offer') return this.pc.createAnswer();
       }).then(answer => {
-        if (answer) {
-          return this.pc.setLocalDescription(answer).then(() => {
-            this.emit('signal', { type: 'sdp', sdp: this.pc.localDescription });
-          });
-        }
+        if (answer) return this.pc.setLocalDescription(answer).then(() => this.emit('signal', { type: 'sdp', sdp: this.pc.localDescription }));
       }).catch(console.error);
     } else if (data.type === 'candidate' || data.candidate) {
       this.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(console.error);
     }
   }
-
-  destroy() {
-    this.pc.close();
-  }
+  destroy() { this.pc.close(); }
 }
 
 export default function App() {
-  // Global State
   const [roomId, setRoomId] = useState('');
   const [username, setUsername] = useState('User_' + Math.floor(Math.random() * 1000));
   const [inRoom, setInRoom] = useState(false);
@@ -96,7 +54,7 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   
   // Room Video State
-  const [videoConfig, setVideoConfig] = useState(null); // { type: 'url'|'hosted'|'local', url: '...' }
+  const [videoConfig, setVideoConfig] = useState(null); // { type: 'cloud'|'hosted'|'local', url: '...' }
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -111,9 +69,8 @@ export default function App() {
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isMicOn, setIsMicOn] = useState(false);
 
-  // Refs
-  const videoRef = useRef(null); // For native <video> (local/hosted MP4s)
-  const reactPlayerRef = useRef(null); // For <ReactPlayer> (YouTube/Drive)
+  const videoRef = useRef(null);
+  const reactPlayerRef = useRef(null);
   const userVideoRef = useRef(null);
   const peersRef = useRef([]);
 
@@ -126,12 +83,11 @@ export default function App() {
 
     socket.on('room-state', (state) => {
       setRoomParticipants(state.participants);
-      // Automatically configure the guest's video player based on what the host set!
+      // Auto-configure the guest's player!
       if (state.videoState && state.videoState.type !== 'local') {
          setVideoConfig(state.videoState);
       } else if (state.videoState && state.videoState.type === 'local') {
-         // Force guest to select local file
-         setVideoConfig({ type: 'local', url: null });
+         setVideoConfig({ type: 'local', url: null }); // Force local file selection
       }
     });
 
@@ -145,12 +101,10 @@ export default function App() {
     });
 
     socket.on('sync-play', (data) => {
-      // Logic for Native Video (Hosted MP4 / Local)
       if (videoRef.current) {
         if (Math.abs(videoRef.current.currentTime - data.currentTime) > 1) videoRef.current.currentTime = data.currentTime;
         videoRef.current.play().catch(e => console.log(e));
       }
-      // Logic for ReactPlayer (YouTube)
       if (reactPlayerRef.current) {
         if (Math.abs(reactPlayerRef.current.getCurrentTime() - data.currentTime) > 1) reactPlayerRef.current.seekTo(data.currentTime);
       }
@@ -235,7 +189,7 @@ export default function App() {
     e.preventDefault();
     if (!username.trim() || !roomId.trim()) return alert("Enter Name and Room ID!");
     socket.connect();
-    socket.emit('join-room', roomId, username, null); // Guests send null state
+    socket.emit('join-room', roomId, username, null);
     setInRoom(true);
   };
 
@@ -246,7 +200,7 @@ export default function App() {
 
     if (hostMode === 'cloud') {
       if (!cloudUrlInput) return alert("Paste a YouTube or Video URL first!");
-      initialVideoState = { type: 'url', url: cloudUrlInput };
+      initialVideoState = { type: 'cloud', url: cloudUrlInput };
       
     } else if (hostMode === 'hosted') {
       if (!pendingVideoFile) return alert("Select a video file to upload!");
@@ -264,7 +218,7 @@ export default function App() {
         initialVideoState = { type: 'hosted', url: `${SOCKET_URL}${data.url}` };
       } catch (err) {
         setIsUploading(false);
-        return alert("Failed to upload video to server.");
+        return alert("Failed to upload video to server. Is the backend running?");
       }
       setIsUploading(false);
 
@@ -288,9 +242,8 @@ export default function App() {
     const isActuallyPlaying = !isPlaying;
     setIsPlaying(isActuallyPlaying);
     
-    // Determine current time based on which player is active
     let cTime = currentTime;
-    if (videoConfig?.type === 'url' && reactPlayerRef.current) cTime = reactPlayerRef.current.getCurrentTime();
+    if (videoConfig?.type === 'cloud' && reactPlayerRef.current) cTime = reactPlayerRef.current.getCurrentTime();
     else if (videoRef.current) cTime = videoRef.current.currentTime;
 
     if (isActuallyPlaying) {
@@ -305,14 +258,12 @@ export default function App() {
   const handleSeek = (e) => {
     const time = parseFloat(e.target.value);
     setCurrentTime(time);
-    if (videoConfig?.type === 'url' && reactPlayerRef.current) reactPlayerRef.current.seekTo(time);
+    if (videoConfig?.type === 'cloud' && reactPlayerRef.current) reactPlayerRef.current.seekTo(time);
     else if (videoRef.current) videoRef.current.currentTime = time;
     socket.emit('video-seek', { roomId, currentTime: time });
   };
 
   // --- 5. RENDER SCREENS ---
-
-  // LANDING PAGE (Not in Room)
   if (!inRoom) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans text-slate-100 py-12">
@@ -399,18 +350,17 @@ export default function App() {
   // MAIN WATCH PARTY ROOM
   return (
     <div className="flex h-screen bg-black text-slate-100 overflow-hidden font-sans">
-      {/* MAIN PLAYER AREA */}
       <div className="flex-1 flex flex-col relative group">
         <div className="flex-1 bg-black flex items-center justify-center relative">
           
           {/* THE DYNAMIC VIDEO PLAYER */}
-          {videoConfig?.type === 'url' ? (
+          {videoConfig?.type === 'cloud' ? (
             <ReactPlayer 
               ref={reactPlayerRef} url={videoConfig.url} playing={isPlaying} 
               width="100%" height="100%" 
               onProgress={(e) => setCurrentTime(e.playedSeconds)}
               onDuration={setDuration}
-              style={{ pointerEvents: 'none' }} // Prevents user from clicking default YouTube controls
+              style={{ pointerEvents: 'none' }} 
             />
           ) : (videoConfig?.type === 'hosted' || (videoConfig?.type === 'local' && videoConfig?.url)) ? (
             <video 
@@ -449,7 +399,7 @@ export default function App() {
                     </button>
                     <span className="text-sm font-mono">
                       {Math.floor(currentTime / 60)}:{Math.floor(currentTime % 60).toString().padStart(2, '0')} / 
-                      {` ${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}`}
+                      {` ${Math.floor(duration / 60)}:{Math.floor(duration % 60).toString().padStart(2, '0')}`}
                     </span>
                   </div>
                   <div className="flex items-center gap-4">
@@ -474,7 +424,6 @@ export default function App() {
             <Settings size={18} className="text-slate-500 cursor-pointer hover:text-white" />
           </div>
           <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto scrollbar-hide">
-            {/* Local WebRTC Video */}
             <div className="aspect-video bg-slate-800 rounded-lg relative overflow-hidden ring-1 ring-slate-700">
               <video playsInline muted autoPlay ref={userVideoRef} className={`w-full h-full object-cover ${!isCameraOn && 'hidden'}`} />
               {!isCameraOn && <div className="absolute inset-0 flex items-center justify-center bg-slate-800/50"><div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">{username[0]}</div></div>}
@@ -483,7 +432,6 @@ export default function App() {
                 <div className="flex gap-1">{isMicOn ? <Mic size={10} className="text-blue-400" /> : <MicOff size={10} className="text-slate-500" />}</div>
               </div>
             </div>
-            {/* Remote WebRTC Videos */}
             {peers.map((peerObj, index) => <RemoteVideo key={index} peer={peerObj.peer} username={peerObj.username} />)}
           </div>
         </div>
@@ -516,7 +464,6 @@ export default function App() {
   );
 }
 
-// Render incoming WebRTC Streams
 const RemoteVideo = ({ peer, username }) => {
   const ref = useRef();
   useEffect(() => { peer.on("stream", stream => { ref.current.srcObject = stream; }); }, [peer]);
