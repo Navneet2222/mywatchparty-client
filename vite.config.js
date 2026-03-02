@@ -11,4 +11,15 @@ export default defineConfig({
   define: {
     global: 'window', // This prevents simple-peer from crashing in Vite
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        },
+      },
+    },
+  },
 })
